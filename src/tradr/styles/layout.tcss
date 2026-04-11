@@ -1,0 +1,24 @@
+Screen {
+	layout: grid;
+	grid-size: 2;
+	grid-columns: 2fr 1fr;
+}
+
+#chart {
+	border: solid green;
+	height: 60%;
+}
+
+#terminal {
+	height: 40%
+}
+
+#watchlist {
+	border: solid blue;
+	height: 100%
+}
+
+.watchlist-table {
+	width: 100%
+}
+

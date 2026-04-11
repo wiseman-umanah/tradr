@@ -8,13 +8,16 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "lxml>=6.0.3",
     "rich>=14.3.3",
     "textual>=8.2.3",
     "textual-dev>=1.8.0",
+    "yfinance>=1.2.1",
 ]
 
 [project.scripts]
 tradr = "tradr:main"
+tradr-dev = "tradr.dev:main"
 
 [build-system]
 requires = ["uv_build>=0.8.5,<0.9.0"]
