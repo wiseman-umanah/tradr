@@ -81,42 +81,6 @@ SCREENERS = [
 ]
 
 
-def get_trending_symbols(limit: int = 100) -> list[str]:
-    """Aggregate a broad set of active symbols."""
-    symbols: list[str] = []
-    seen: set[str] = set()
-
-    for screener in SCREENERS:
-        try:
-            screen = yf.screen(screener)
-        except Exception:
-            continue
-
-        for quote in screen.get("quotes", []):
-            symbol = quote.get("symbol")
-            if not symbol or symbol in seen:
-                continue
-            seen.add(symbol)
-            symbols.append(symbol)
-            if len(symbols) >= limit:
-                return symbols
-
-    if not symbols:
-        try:
-            from yfinance import tickers
-
-            for symbol in tickers.sp500():
-                if not symbol or symbol in seen:
-                    continue
-                seen.add(symbol)
-                symbols.append(symbol)
-                if len(symbols) >= limit:
-                    break
-        except Exception:
-            return []
-
-    return symbols[:limit]
-
 
 def is_cache_fresh() -> bool:
     """Check if symbols cache is less than 24 hours old"""

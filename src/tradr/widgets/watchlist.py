@@ -94,6 +94,7 @@ class Watchlist(DataTable):
         self.pinned_symbols.remove(symbol)
         self._update_display_symbols()
         self._remove_stale_rows()
+        self.load_watchlist()
         return True
 
     @work(thread=True)
@@ -128,6 +129,8 @@ class Watchlist(DataTable):
 
     def _fetch_single(self, symbol: str) -> tuple[str, tuple | None]:
         """Fetch price data for one symbol"""
+        if "." in symbol or len(symbol) > 5:
+            return symbol, None
         try:
             info = yf.Ticker(symbol).fast_info
             price = info.last_price
@@ -152,7 +155,7 @@ class Watchlist(DataTable):
         valid = set(self.symbols)
         for key in list(self._row_keys):
             if key not in valid:
-                self.app.call_from_thread(self.remove_row, key)
+                self.remove_row(key)
                 self._row_keys.discard(key)
 
     def _show_placeholder(self, message: str) -> None:

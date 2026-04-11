@@ -1,8 +1,15 @@
+from __future__ import annotations
+
+import os
+from rich.text import Text
 from textual.containers import Vertical
 from textual.widgets import Input, RichLog
 from textual.app import ComposeResult
 from textual.widget import Widget
-from textual import on
+from textual import on, work
+
+from tradr.commands import CommandContext, CommandResponse, execute_command
+from tradr import groq
 
 
 class AiChat(Widget):
@@ -11,6 +18,8 @@ class AiChat(Widget):
 
     def __init__(self) -> None:
         super().__init__(id="terminal")
+        self.history: list[tuple[str, str]] = []
+        self.ai_ready: bool = False
 
     def compose(self) -> ComposeResult:
         self.output = RichLog(id="output", highlight=True, markup=True)
@@ -21,68 +30,108 @@ class AiChat(Widget):
 
     def on_mount(self) -> None:
         self.query_one("#input", Input).focus()
+        self._init_ai_client()
 
+    def _init_ai_client(self) -> None:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            self.ai_ready = False
+            self.output.write("[yellow]Set GROQ_API_KEY to enable AI responses.[/yellow]")
+            return
+        try:
+            groq.init_client(api_key)
+            self.ai_ready = True
+        except Exception as exc:
+            self.ai_ready = False
+            self.output.write(f"[red]Failed to initialize Groq client: {exc}[/red]")
+
+    def clear_history(self, clear_log: bool = False) -> None:
+        """Clear stored chat history and optionally wipe the log."""
+        self.history.clear()
+        if clear_log:
+            self.output.clear()
 
     # COMMAND HANDLER
-    def run_command(self, text: str) -> None:
+    def run_command(self, text: str) -> bool:
         parts = text.strip().split()
 
         if not parts:
-            return
+            return True
 
-        cmd = parts[0]
+        cmd = parts[0].lower()
         args = parts[1:]
+        context = CommandContext(app=self.app, chat=self)
 
-        commands = {
-            "analyze": self.cmd_analyze,
-            "buy": self.cmd_buy,
-            "sell": self.cmd_sell,
-            "help": self.cmd_help,
-        }
+        response = execute_command(cmd, context, args)
+        if response is None:
+            return False
 
-        if cmd in commands:
-            commands[cmd](args)
-        else:
-            self.chat_with_ai(text)
+        self._write_response(response)
+        if response.success:
+            plain = Text.from_markup(response.message).plain
+            self._record_history("assistant", plain)
+        return True
 
+    def _write_response(self, response: CommandResponse) -> None:
+        self.output.write(response.message)
 
+    def _record_history(self, role: str, text: str) -> None:
+        self.history.append((role, text.strip()))
+        if len(self.history) > 50:
+            self.history = self.history[-50:]
 
-    # COMMAND IMPLEMENTATIONS
-    def cmd_analyze(self, args):
-        if not args:
-            self.output.write("[red]Usage: analyze <symbol>[/red]")
-            return
-
-        symbol = args[0]
-        self.output.write(f"[cyan]Analyzing {symbol}...[/cyan]")
-
-    def cmd_buy(self, args):
-        if len(args) < 2:
-            self.output.write("[red]Usage: buy <symbol> <qty>[/red]")
-            return
-
-        symbol, qty = args
-        self.output.write(f"[green]Buying {qty} shares of {symbol}[/green]")
-
-    def cmd_sell(self, args):
-        if len(args) < 2:
-            self.output.write("[red]Usage: sell <symbol> <qty>[/red]")
-            return
-
-        symbol, qty = args
-        self.output.write(f"[yellow]Selling {qty} shares of {symbol}[/yellow]")
-
-    def cmd_help(self, args):
-        self.output.write("[bold]Available commands:[/bold]")
-        self.output.write(" - analyze <symbol>")
-        self.output.write(" - buy <symbol> <qty>")
-        self.output.write(" - sell <symbol> <qty>")
-        self.output.write(" - help")
-
-
-    # AI FALLBACK
     def chat_with_ai(self, text: str):
-        self.output.write(f"[magenta]AI:[/magenta] Thinking about '{text}'...")
+        if not self.ai_ready:
+            self.output.write(
+                "[magenta]AI assistant unavailable. Set GROQ_API_KEY to enable it.[/magenta]"
+            )
+            return
+
+        context = self._compose_context()
+        prompt = groq.load_prompt(context=context, question=text)
+        self.output.write("[magenta]AI:[/magenta] Thinking...")
+        self._ask_ai(prompt)
+
+    def _compose_context(self) -> str:
+        lines: list[str] = []
+        try:
+            from tradr.widgets.chart import Chart
+
+            chart = self.app.query_one("#chart", Chart)
+            lines.append(
+                f"Chart symbol: {chart.symbol}, period: {chart.period}, interval: {chart.interval}"
+            )
+        except Exception:
+            pass
+
+        try:
+            from tradr.widgets.watchlist import Watchlist
+
+            watchlist = self.app.query_one("#watchlist", Watchlist)
+            if watchlist.pinned_symbols:
+                pins = ", ".join(watchlist.pinned_symbols[:10])
+                lines.append(f"Pinned symbols: {pins}")
+        except Exception:
+            pass
+
+        lines.extend(f"{role.upper()}: {text}" for role, text in self.history[-10:])
+        return "\n".join(lines)
+
+    @work(thread=True)
+    def _ask_ai(self, prompt: str) -> None:
+        try:
+            reply = groq.answer_question(prompt)
+        except Exception as exc:
+            self.app.call_from_thread(self._handle_ai_error, exc)
+            return
+        self.app.call_from_thread(self._handle_ai_reply, reply)
+
+    def _handle_ai_reply(self, reply: str) -> None:
+        self.output.write(f"[magenta]AI:[/magenta] {reply}")
+        self._record_history("assistant", reply)
+
+    def _handle_ai_error(self, error: Exception) -> None:
+        self.output.write(f"[red]AI error: {error}[/red]")
 
 
     # INPUT HANDLER
@@ -93,11 +142,12 @@ class AiChat(Widget):
         if not text:
             return
 
-        # display user input like terminal
-        self.output.write(text)
+        self.output.write(f"[bold]>[/bold] {text}")
+        self._record_history("user", text)
 
-        # process command
-        self.run_command(text)
+        handled = self.run_command(text)
+        if not handled:
+            self.chat_with_ai(text)
 
         # clear input
         event.input.value = ""
