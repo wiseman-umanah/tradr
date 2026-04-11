@@ -5,9 +5,43 @@ from textual_plotext import PlotextPlot
 from tradr.market import get_ohlcv, extract_ohlcv
 
 DEFAULT_SYMBOL = "AAPL"
-DEFAULT_PERIOD = "1d"
+DEFAULT_PERIOD = "5d"
 DEFAULT_INTERVAL = "5m"
 REFRESH_SECONDS = 30
+MAX_CANDLES = 240
+VALID_PERIODS = {
+    "1d",
+    "5d",
+    "1mo",
+    "3mo",
+    "6mo",
+    "1y",
+    "2y",
+    "5y",
+    "10y",
+    "ytd",
+    "max",
+}
+VALID_INTERVALS = {
+    "1m",
+    "2m",
+    "5m",
+    "15m",
+    "30m",
+    "60m",
+    "90m",
+    "1h",
+    "1d",
+    "5d",
+    "1wk",
+    "1mo",
+    "3mo",
+}
+
+
+def _normalize(value: str, allowed: set[str], fallback: str) -> str:
+    """Return value if it is allowed, otherwise fallback."""
+    return value if value in allowed else fallback
 
 
 class Chart(PlotextPlot):
@@ -37,7 +71,6 @@ class Chart(PlotextPlot):
 
     def refresh_chart(self) -> None:
         """Kick off a background refresh."""
-        self.loading = True
         self.load_chart()
 
     @work(thread=True)
@@ -51,7 +84,12 @@ class Chart(PlotextPlot):
                 f"{self.symbol} {self.period} @ {self.interval}"
             )
 
-            data = get_ohlcv(self.symbol, self.period, self.interval)
+            data = get_ohlcv(
+                self.symbol,
+                self.period,
+                self.interval,
+                max_candles=MAX_CANDLES,
+            )
             ohlcv = extract_ohlcv(data)
 
             plot = self.plt
@@ -78,7 +116,17 @@ class Chart(PlotextPlot):
         """Call this from outside to update the chart"""
         self.symbol = symbol
         if period is not None:
-            self.period = period
+            normalized_period = _normalize(period, VALID_PERIODS, DEFAULT_PERIOD)
+            if normalized_period != period:
+                self.log(
+                    f"Invalid period '{period}' received, using '{normalized_period}'"
+                )
+            self.period = normalized_period
         if interval is not None:
-            self.interval = interval
+            normalized_interval = _normalize(interval, VALID_INTERVALS, DEFAULT_INTERVAL)
+            if normalized_interval != interval:
+                self.log(
+                    f"Invalid interval '{interval}' received, using '{normalized_interval}'"
+                )
+            self.interval = normalized_interval
         self.refresh_chart()

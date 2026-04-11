@@ -1,3 +1,5 @@
+from datetime import datetime
+from datetime import datetime
 import yfinance as yf
 import pandas as pd
 from pandas import DataFrame
@@ -7,7 +9,12 @@ def get_current_price(symbol):
     pass
 
 
-def get_ohlcv(symbol, period: str = "1mo", interval: str = "1d") -> DataFrame:
+def get_ohlcv(
+    symbol,
+    period: str = "1mo",
+    interval: str = "1d",
+    max_candles: int | None = None,
+) -> DataFrame:
     """Download the OHLCV data for a stock."""
     data = yf.download(
         symbol,
@@ -19,21 +26,25 @@ def get_ohlcv(symbol, period: str = "1mo", interval: str = "1d") -> DataFrame:
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
     data = data.dropna()
+    if not data.empty and max_candles is not None:
+        data = data.tail(max_candles)
     return data
 
 
 def _format_timestamp(ts) -> str:
     """Convert a pandas timestamp to a display string."""
+    local_tz = datetime.now().astimezone().tzinfo
     if isinstance(ts, pd.Timestamp):
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert(local_tz)
         ts = ts.to_pydatetime()
     elif not hasattr(ts, "strftime"):
         ts = pd.Timestamp(ts).to_pydatetime()
 
-    tzinfo = getattr(ts, "tzinfo", None)
-    if tzinfo is not None:
-        ts = ts.replace(tzinfo=None)
+    if getattr(ts, "tzinfo", None) is not None:
+        ts = ts.astimezone(local_tz)
 
-    return ts.strftime("%d/%m/%Y %H:%M")
+    return ts.replace(tzinfo=None).strftime("%d/%m/%Y %H:%M")
 
 
 def extract_ohlcv(data: DataFrame) -> dict[str, list]:
