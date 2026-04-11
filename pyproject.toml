@@ -12,6 +12,7 @@ dependencies = [
     "rich>=14.3.3",
     "textual>=8.2.3",
     "textual-dev>=1.8.0",
+    "textual-plotext>=1.0.1",
     "yfinance>=1.2.1",
 ]
 

@@ -5,12 +5,12 @@ Screen {
 }
 
 #chart {
+	height: 70%;
 	border: solid green;
-	height: 60%;
 }
 
 #terminal {
-	height: 40%
+	height: 30%;
 }
 
 #watchlist {
@@ -21,4 +21,3 @@ Screen {
 .watchlist-table {
 	width: 100%
 }
-

@@ -1,9 +1,9 @@
 from textual.app import App, ComposeResult
 from textual.widgets import Static, Header, Footer
 from textual.containers import Vertical
-from .widgets.ai import AiChat
-from .widgets.chart import Chart
-from .widgets.watchlist import Watchlist
+from tradr.widgets.ai import AiChat
+from tradr.widgets.chart import Chart
+from tradr.widgets.watchlist import Watchlist
 
 
 
