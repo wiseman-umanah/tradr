@@ -7,6 +7,7 @@ import yfinance as yf
 from textual.app import App
 
 from tradr.market import get_ohlcv
+from tradr import groq
 from tradr.widgets.chart import Chart
 from tradr.widgets.watchlist import Watchlist
 
@@ -188,6 +189,21 @@ def sell_stock(context: CommandContext, args: Sequence[str]) -> CommandResponse:
     return CommandResponse.ok(f"Virtual order: sell {qty:g} shares of [bold]{symbol}[/bold].")
 
 
+def set_api_key(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    if len(args) != 1:
+        return CommandResponse.error("Usage: set-key <GROQ_API_KEY>")
+    api_key = args[0].strip()
+    try:
+        groq.save_api_key(api_key)
+        groq.init_client(api_key)
+        context.chat.ai_ready = True
+        return CommandResponse.ok("Groq API key saved and validated.")
+    except ValueError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to save key: {exc}")
+
+
 COMMANDS: dict[str, Command] = {
     "help": Command(
         name="help",
@@ -238,6 +254,12 @@ COMMANDS: dict[str, Command] = {
         description="Record a virtual sell order",
         usage="sell <symbol> <qty>",
         handler=sell_stock,
+    ),
+    "set-key": Command(
+        name="set-key",
+        description="Validate and store Groq API key",
+        usage="set-key <GROQ_API_KEY>",
+        handler=set_api_key,
     ),
 }
 

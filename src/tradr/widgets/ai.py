@@ -46,7 +46,7 @@ class AiChat(Widget):
         except FileNotFoundError:
             self.ai_ready = False
             self.output.write(
-                "[yellow]Set GROQ_API_KEY or run save_api_key() to enable AI responses.[/yellow]"
+                "[yellow]Set GROQ_API_KEY or run set-key <GROQ_API_KEY> to enable AI responses.[/yellow]"
             )
         except ValueError as exc:
             self.ai_ready = False
