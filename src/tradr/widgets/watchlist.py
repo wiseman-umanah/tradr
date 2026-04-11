@@ -1,94 +1,181 @@
-from rich.table import Table
+from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.text import Text
-from textual.widgets import Static
 from textual import work
-from textual.reactive import reactive
-from tradr.market import get_trending_symbols
+from textual.widgets import DataTable
+from tradr.market import load_symbol_list
 import yfinance as yf
 
+REFRESH_SECONDS = 30
+SYMBOL_REFRESH_SECONDS = 86400  # 24 hours
+MAX_WORKERS = 20
+DISPLAY_SIZE = 50  # symbols visible at a time
+ROTATION_SECONDS = 300  # rotate pool every 5 mins
 
-PAGE_SIZE = 10
-
-
-class Watchlist(Static):
-    """Handle the Watchlist """
-    can_focus=True
-    current_page = reactive(0)
+class Watchlist(DataTable):
+    """Scrollable watchlist that streams price updates."""
 
     def __init__(self) -> None:
         super().__init__(id="watchlist")
+        self.all_symbols: list[str] = []
+        self.pinned_symbols: list[str] = []
+        self.symbols: list[str] = []
+        self._row_keys: set[str] = set()
+        self._column_keys: list = []
+        self._price_cache: dict[str, tuple] = {}
+        self._pool_offset: int = 0
+        self.loading = True
 
     def on_mount(self) -> None:
-        self.loading = True
-        self.symbols = get_trending_symbols()
-        self.render_empty_table()
-        self.load_watchlist()
-        self.set_interval(30, self.load_watchlist)
-        self.set_interval(10, self.next_page)
-
-
-    def render_empty_table(self) -> None:
-        table = Table(
-            "Symbol", "Price", "Change", "P/L",
-            title="Watchlist", expand=True,
-            show_edge=True, pad_edge=True,
-            box=None, show_lines=False
+        self.cursor_type = "row"
+        self.zebra_stripes = True
+        self.show_header = True
+        self._column_keys = list(
+            self.add_columns("Symbol", "Price", "Change", "P/L")
         )
-        self.update(table)
+        self._show_placeholder("Loading symbols…")
+        self._fetch_symbols()
+        self.set_interval(REFRESH_SECONDS, self.load_watchlist)
+        self.set_interval(ROTATION_SECONDS, self._rotate_pool)
+        self.set_interval(SYMBOL_REFRESH_SECONDS, self._fetch_symbols)
 
+    @work(thread=True)
+    def _fetch_symbols(self) -> None:
+        """Download or load cached symbol list"""
+        symbols = load_symbol_list()
+        if symbols:
+            self.all_symbols = symbols
+            self._update_display_symbols()
+            self.app.call_from_thread(self.load_watchlist)
+        else:
+            self.app.call_from_thread(
+                self._show_placeholder, "Failed to load symbols"
+            )
 
-    def next_page(self) -> None:
-        if not self.symbols:
-            return
-        total_pages = (len(self.symbols) + PAGE_SIZE - 1) // PAGE_SIZE
-        self.current_page = (self.current_page + 1) % total_pages
+    def _update_display_symbols(self) -> None:
+        """
+        Build display list:
+        pinned symbols first then
+        rotating slice from full pool
+        """
+        pool = [s for s in self.all_symbols if s not in self.pinned_symbols]
+        start = self._pool_offset % max(len(pool), 1)
+        end = start + DISPLAY_SIZE
+        # wrap around if we hit the end of the pool
+        if end <= len(pool):
+            rotating = pool[start:end]
+        else:
+            rotating = pool[start:] + pool[:end - len(pool)]
+        self.symbols = self.pinned_symbols + rotating
 
-
-    def watch_current_page(self, page: int) -> None:
+    def _rotate_pool(self) -> None:
+        """Advance the pool offset to show different symbols"""
+        pool_size = max(len(self.all_symbols) - len(self.pinned_symbols), 1)
+        self._pool_offset = (self._pool_offset + DISPLAY_SIZE) % pool_size
+        self._update_display_symbols()
+        self._remove_stale_rows()
         self.load_watchlist()
 
+    def pin_symbol(self, symbol: str) -> bool:
+        """Pin a user requested symbol to the top of the watchlist"""
+        symbol = symbol.upper().strip()
+        if symbol in self.pinned_symbols:
+            return False
+        self.pinned_symbols.insert(0, symbol)
+        self._update_display_symbols()
+        self.load_watchlist()
+        return True
+
+    def unpin_symbol(self, symbol: str) -> bool:
+        """Remove a pinned symbol"""
+        symbol = symbol.upper().strip()
+        if symbol not in self.pinned_symbols:
+            return False
+        self.pinned_symbols.remove(symbol)
+        self._update_display_symbols()
+        self._remove_stale_rows()
+        return True
 
     @work(thread=True)
     def load_watchlist(self) -> None:
-        start = self.current_page * PAGE_SIZE
-        end = start + PAGE_SIZE
-        page_symbols = self.symbols[start:end]
+        """Fetch prices for current display symbols in parallel"""
+        if not self.symbols:
+            return
+        self.app.call_from_thread(self._clear_placeholder)
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(self._fetch_single, symbol): symbol
+                for symbol in self.symbols
+            }
+            for future in as_completed(futures):
+                symbol, row = future.result()
+                if row is not None:
+                    self._price_cache[symbol] = row
+                    self.app.call_from_thread(self._upsert_row, symbol, row)
+                else:
+                    cached = self._price_cache.get(symbol)
+                    if cached:
+                        self.app.call_from_thread(self._upsert_row, symbol, cached)
+                    else:
+                        fallback = (
+                            Text(symbol, style="dim"),
+                            Text("N/A", style="dim"),
+                            Text("N/A", style="dim"),
+                            Text("N/A", style="dim"),
+                        )
+                        self.app.call_from_thread(self._upsert_row, symbol, fallback)
+        self.app.call_from_thread(setattr, self, "loading", False)
 
-        table = Table(
-                "Symbol", "Price",
-                "Change", "P/L",
-                title="Watchlist", expand=True,
-                show_edge=True, pad_edge=True, box=None, show_lines=False
+    def _fetch_single(self, symbol: str) -> tuple[str, tuple | None]:
+        """Fetch price data for one symbol"""
+        try:
+            info = yf.Ticker(symbol).fast_info
+            price = info.last_price
+            prev_close = info.previous_close
+            if price is None or prev_close is None or prev_close == 0:
+                raise ValueError("Missing price data")
+            change_pct = ((price - prev_close) / prev_close) * 100
+            profit_loss = price - prev_close
+            color = "green" if change_pct >= 0 else "red"
+            arrow = "▲" if change_pct >= 0 else "▼"
+            row = (
+                Text(symbol, style="bold"),
+                Text(f"${price:.2f}", style=color),
+                Text(f"{arrow} {abs(change_pct):.2f}%", style=color),
+                Text(f"{profit_loss:+.2f}", style=color),
             )
+            return symbol, row
+        except Exception:
+            return symbol, None
 
-        for symbol in page_symbols:
-            try:
-                ticker = yf.Ticker(symbol)
-                info = ticker.fast_info
+    def _remove_stale_rows(self) -> None:
+        valid = set(self.symbols)
+        for key in list(self._row_keys):
+            if key not in valid:
+                self.app.call_from_thread(self.remove_row, key)
+                self._row_keys.discard(key)
 
-                price = info.last_price
-                prev_close = info.previous_close
-                change = ((price - prev_close) / prev_close) * 100
-                pl = price - prev_close
+    def _show_placeholder(self, message: str) -> None:
+        self.clear()
+        self._row_keys.clear()
+        self.add_row(
+            Text(message, style="dim"),
+            Text("-", style="dim"),
+            Text("-", style="dim"),
+            Text("-", style="dim"),
+            key="__placeholder__",
+        )
+        self._row_keys.add("__placeholder__")
 
-                # color based on direction
-                color = "green" if change >= 0 else "red"
-                arrow = "▲" if change >= 0 else "▼"
+    def _clear_placeholder(self) -> None:
+        if "__placeholder__" in self._row_keys:
+            self.remove_row("__placeholder__")
+            self._row_keys.discard("__placeholder__")
 
-                table.add_row(
-                    Text(symbol, style="bold"),
-                    Text(f"${price:.2f}", style=color),
-                    Text(f"{arrow} {abs(change):.2f}%", style=color),
-                    Text(f"{'+' if pl >= 0 else ''}{pl:.2f}", style=color),
-                )
-            except Exception:
-                table.add_row(
-                    Text(symbol, style="dim"),
-                    Text("N/A", style="dim"),
-                    Text("N/A", style="dim"),
-                    Text("N/A", style="dim"),
-                )
-        self.app.call_from_thread(setattr, self, 'loading', False)
-        self.app.call_from_thread(self.update, table)
-
-
+    def _upsert_row(self, key: str, row: tuple) -> None:
+        if key in self._row_keys:
+            for col_key, value in zip(self._column_keys, row):
+                self.update_cell(key, col_key, value)
+        else:
+            self.add_row(*row, key=key)
+            self._row_keys.add(key)
