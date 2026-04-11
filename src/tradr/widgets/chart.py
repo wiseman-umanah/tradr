@@ -54,7 +54,8 @@ class Chart(PlotextPlot):
         self.period = DEFAULT_PERIOD
         self.interval = DEFAULT_INTERVAL
         self._error: str | None = None
-        self.theme = "dark"
+        # follow the application's current theme (auto = textual palette)
+        self.theme = "auto"
 
     def on_mount(self) -> None:
         self.loading = True

@@ -33,17 +33,27 @@ class AiChat(Widget):
         self._init_ai_client()
 
     def _init_ai_client(self) -> None:
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            self.ai_ready = False
-            self.output.write("[yellow]Set GROQ_API_KEY to enable AI responses.[/yellow]")
-            return
         try:
-            groq.init_client(api_key)
+            api_key = os.getenv("GROQ_API_KEY")
+            if api_key:
+                groq.init_client(api_key)
+                self.ai_ready = True
+                return
+
+            key = groq.get_api_key()
+            groq.init_client(key)
             self.ai_ready = True
-        except Exception as exc:
+        except FileNotFoundError:
+            self.ai_ready = False
+            self.output.write(
+                "[yellow]Set GROQ_API_KEY or run save_api_key() to enable AI responses.[/yellow]"
+            )
+        except ValueError as exc:
             self.ai_ready = False
             self.output.write(f"[red]Failed to initialize Groq client: {exc}[/red]")
+        except Exception as exc:
+            self.ai_ready = False
+            self.output.write(f"[red]Could not connect to Groq: {exc}[/red]")
 
     def clear_history(self, clear_log: bool = False) -> None:
         """Clear stored chat history and optionally wipe the log."""
