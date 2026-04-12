@@ -20,6 +20,12 @@ Screen {
 	padding: 1;
 }
 
+.branding {
+	text-align: center;
+	color: $text;
+	padding: 1 0;
+}
+
 .watchlist-table {
 	width: 100%
 }

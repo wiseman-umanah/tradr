@@ -204,6 +204,16 @@ def set_api_key(context: CommandContext, args: Sequence[str]) -> CommandResponse
         return CommandResponse.error(f"Failed to save key: {exc}")
 
 
+def about_app(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    lines = [
+        "[bold]Tradr[/bold] — a terminal trading desk.",
+        "Built by [cyan]Wiseman Umanah[/cyan] (@wiseman-umanah).",
+        "Features candlestick charts, AI chat, and a live watchlist.",
+        "GitHub: https://github.com/wiseman-umanah",
+    ]
+    return CommandResponse.ok("\n".join(lines))
+
+
 COMMANDS: dict[str, Command] = {
     "help": Command(
         name="help",
@@ -260,6 +270,12 @@ COMMANDS: dict[str, Command] = {
         description="Validate and store Groq API key",
         usage="set-key <GROQ_API_KEY>",
         handler=set_api_key,
+    ),
+    "about": Command(
+        name="about",
+        description="About the app and author",
+        usage="about",
+        handler=about_app,
     ),
 }
 

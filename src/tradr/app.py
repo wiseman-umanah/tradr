@@ -1,3 +1,4 @@
+from datetime import datetime
 from textual.app import App, ComposeResult
 from textual.widgets import Static, Header, Footer
 from textual.containers import Vertical
@@ -10,6 +11,8 @@ from tradr.widgets.watchlist import Watchlist
 class TradrApp(App):
     """Terminal Trader App"""
     CSS_PATH = "styles/layout.tcss"
+    TITLE = "Tradr — Terminal Market Desk"
+    SUB_TITLE = "Built by Wiseman Umanah (@wiseman-umanah)"
 
     BINDINGS = [("d", "toggle_dark", "Toggle dark mode")]
 

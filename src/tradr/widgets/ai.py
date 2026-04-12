@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+from rich.markdown import Markdown
 from rich.text import Text
 from textual.containers import Vertical
 from textual.widgets import Input, RichLog
@@ -137,11 +139,32 @@ class AiChat(Widget):
         self.app.call_from_thread(self._handle_ai_reply, reply)
 
     def _handle_ai_reply(self, reply: str) -> None:
+        if self._looks_like_markdown(reply):
+            try:
+                markdown = Markdown(reply)
+                self.output.write(Text.from_markup("[magenta]AI:[/magenta]"))
+                self.output.write(markdown)
+                self._record_history("assistant", reply)
+                return
+            except Exception:
+                pass
+
         self.output.write(f"[magenta]AI:[/magenta] {reply}")
         self._record_history("assistant", reply)
 
     def _handle_ai_error(self, error: Exception) -> None:
         self.output.write(f"[red]AI error: {error}[/red]")
+
+    def _looks_like_markdown(self, text: str) -> bool:
+        markdown_patterns = [
+            r"\*\*.+\*\*",
+            r"__.+__",
+            r"`.+`",
+            r"```.+```",
+            r"^#+\s",
+            r"\*\s.+",
+        ]
+        return any(re.search(pattern, text, flags=re.DOTALL | re.MULTILINE) for pattern in markdown_patterns)
 
 
     # INPUT HANDLER

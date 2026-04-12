@@ -5,7 +5,7 @@ from textual_plotext import PlotextPlot
 from tradr.market import get_ohlcv, extract_ohlcv
 
 DEFAULT_SYMBOL = "AAPL"
-DEFAULT_PERIOD = "5d"
+DEFAULT_PERIOD = "1d"
 DEFAULT_INTERVAL = "5m"
 REFRESH_SECONDS = 30
 MAX_CANDLES = 240
