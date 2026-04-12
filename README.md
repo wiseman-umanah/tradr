@@ -11,13 +11,24 @@ Tradr is a Textual-based terminal trading desk built by **Wiseman Umanah**. It c
 
 ## Getting Started
 
+### Linux/macOS via install script
+
 ```bash
-uv sync
-uv run tradr
-run `set-key <gsk_...>` in the app
+curl -fsSL https://raw.githubusercontent.com/wiseman-umanah/tradr/refs/heads/master/install.sh | bash
 ```
 
-Press `d` to toggle the theme, type `help` to see every command, and run `about` to view author details.
+The script installs dependencies with `uv`, sets up entry points, and guides you through launching `tradr-dev`.
+
+### Windows / manual install
+
+```bash
+pip install tradr
+# or, for development:
+uv sync
+uv run tradr
+```
+
+Set `GROQ_API_KEY="gsk_..."` (or run `set-key <gsk_...>` inside the app), press `d` to toggle the theme, type `help` to see every command, and run `about` to view author details.
 
 ## About the Author
 
