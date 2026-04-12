@@ -1,3 +1,8 @@
+<img width="1359" height="620" alt="Screenshot From 2026-04-12 00-52-37" src="https://github.com/user-attachments/assets/ac78f801-8f70-4e6b-9975-887f1af09f53" />
+
+<img width="1359" height="620" alt="Screenshot From 2026-04-12 00-52-53" src="https://github.com/user-attachments/assets/9cc216e5-9347-4eb7-bc5e-9384be5709d1" />
+
+
 # Tradr
 
 Tradr is a Textual-based terminal trading desk built by **Wiseman Umanah**. It combines a live ASCII candlestick chart, an AI-powered chat console, and a continuously updating watchlist sourced from Yahoo Finance screeners.
