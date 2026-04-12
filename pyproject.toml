@@ -1,12 +1,23 @@
 [project]
 name = "tradr"
 version = "0.1.0"
-description = "Add your description here"
+description = "Terminal-first trading cockpit with Textual, Plotext charts, AI chat, and a live watchlist"
 readme = "README.md"
 authors = [
     { name = "wiseman-umanah", email = "wisemanumanah@gmail.com" }
 ]
 requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["textual", "terminal", "trading", "stocks", "plotext", "watchlist"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Environment :: Console",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
 dependencies = [
     "groq>=1.1.2",
     "plotext>=5.3.2",
@@ -21,6 +32,14 @@ dependencies = [
 tradr = "tradr:main"
 tradr-dev = "tradr.dev:main"
 
+[project.urls]
+Homepage = "https://github.com/wiseman-umanah/tradr"
+Repository = "https://github.com/wiseman-umanah/tradr"
+Issues = "https://github.com/wiseman-umanah/tradr/issues"
+
 [build-system]
 requires = ["uv_build>=0.8.5,<0.9.0"]
 build-backend = "uv_build"
+
+[tool.setuptools.package-data]
+tradr = ["prompt.txt"]
