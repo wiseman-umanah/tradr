@@ -1,6 +1,6 @@
 [project]
 name = "tradr"
-version = "0.1.0"
+version = "0.1.1"
 description = "Terminal-first trading cockpit with Textual, Plotext charts, AI chat, and a live watchlist"
 readme = "README.md"
 authors = [
@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 license = { text = "MIT" }
-keywords = ["textual", "terminal", "trading", "stocks", "plotext", "watchlist"]
+keywords = ["textual", "crypto", "terminal", "trading", "stocks", "plotext", "watchlist"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Financial and Insurance Industry",
