@@ -1,14 +1,11 @@
 from __future__ import annotations
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.text import Text
 from textual import work
 from textual.widgets import DataTable
-from tradr.market import load_symbol_list
-import yfinance as yf
+from tradr.market import get_snapshots, load_symbol_list
 
 REFRESH_SECONDS = 30
 SYMBOL_REFRESH_SECONDS = 86400  # 24 hours
-MAX_WORKERS = 20
 DISPLAY_SIZE = 50  # symbols visible at a time
 ROTATION_SECONDS = 300  # rotate pool every 5 mins
 
@@ -99,57 +96,47 @@ class Watchlist(DataTable):
 
     @work(thread=True)
     def load_watchlist(self) -> None:
-        """Fetch prices for current display symbols in parallel"""
+        """Fetch prices for current display symbols."""
         if not self.symbols:
             return
         self.app.call_from_thread(self._clear_placeholder)
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(self._fetch_single, symbol): symbol
-                for symbol in self.symbols
-            }
-            for future in as_completed(futures):
-                symbol, row = future.result()
-                if row is not None:
-                    self._price_cache[symbol] = row
-                    self.app.call_from_thread(self._upsert_row, symbol, row)
+        snapshots = get_snapshots(self.symbols)
+        for symbol in self.symbols:
+            row = self._row_from_snapshot(symbol, snapshots.get(symbol))
+            if row is not None:
+                self._price_cache[symbol] = row
+                self.app.call_from_thread(self._upsert_row, symbol, row)
+            else:
+                cached = self._price_cache.get(symbol)
+                if cached:
+                    self.app.call_from_thread(self._upsert_row, symbol, cached)
                 else:
-                    cached = self._price_cache.get(symbol)
-                    if cached:
-                        self.app.call_from_thread(self._upsert_row, symbol, cached)
-                    else:
-                        fallback = (
-                            Text(symbol, style="dim"),
-                            Text("N/A", style="dim"),
-                            Text("N/A", style="dim"),
-                            Text("N/A", style="dim"),
-                        )
-                        self.app.call_from_thread(self._upsert_row, symbol, fallback)
+                    fallback = (
+                        Text(symbol, style="dim"),
+                        Text("N/A", style="dim"),
+                        Text("N/A", style="dim"),
+                        Text("N/A", style="dim"),
+                    )
+                    self.app.call_from_thread(self._upsert_row, symbol, fallback)
         self.app.call_from_thread(setattr, self, "loading", False)
 
-    def _fetch_single(self, symbol: str) -> tuple[str, tuple | None]:
-        """Fetch price data for one symbol"""
-        if "." in symbol or len(symbol) > 5:
-            return symbol, None
-        try:
-            info = yf.Ticker(symbol).fast_info
-            price = info.last_price
-            prev_close = info.previous_close
-            if price is None or prev_close is None or prev_close == 0:
-                raise ValueError("Missing price data")
-            change_pct = ((price - prev_close) / prev_close) * 100
-            profit_loss = price - prev_close
-            color = "green" if change_pct >= 0 else "red"
-            arrow = "▲" if change_pct >= 0 else "▼"
-            row = (
-                Text(symbol, style="bold"),
-                Text(f"${price:.2f}", style=color),
-                Text(f"{arrow} {abs(change_pct):.2f}%", style=color),
-                Text(f"{profit_loss:+.2f}", style=color),
-            )
-            return symbol, row
-        except Exception:
-            return symbol, None
+    def _row_from_snapshot(self, symbol: str, snapshot: dict | None) -> tuple | None:
+        """Build a table row from a market snapshot."""
+        if snapshot is None:
+            return None
+        price = snapshot.get("price")
+        change_pct = snapshot.get("change_pct")
+        profit_loss = snapshot.get("change")
+        if price is None or change_pct is None or profit_loss is None:
+            return None
+        color = "green" if change_pct >= 0 else "red"
+        arrow = "▲" if change_pct >= 0 else "▼"
+        return (
+            Text(symbol, style="bold"),
+            Text(f"${price:.2f}", style=color),
+            Text(f"{arrow} {abs(change_pct):.2f}%", style=color),
+            Text(f"{profit_loss:+.2f}", style=color),
+        )
 
     def _remove_stale_rows(self) -> None:
         valid = set(self.symbols)

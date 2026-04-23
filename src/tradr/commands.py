@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Iterable, Sequence, TYPE_CHECKING
 
 import yfinance as yf
+from rich.console import Group
+from rich.table import Table
+from rich.text import Text
 from textual.app import App
 
 from tradr.market import get_ohlcv
 from tradr import groq
+from tradr import trading
 from tradr.widgets.chart import Chart
 from tradr.widgets.watchlist import Watchlist
 
@@ -19,16 +23,17 @@ if TYPE_CHECKING:
 class CommandResponse:
     """Normalized response from a command handler."""
 
-    message: str
+    message: Any
     success: bool = True
+    history_text: str | None = None
 
     @classmethod
-    def ok(cls, message: str) -> "CommandResponse":
-        return cls(message=message, success=True)
+    def ok(cls, message: Any, history_text: str | None = None) -> "CommandResponse":
+        return cls(message=message, success=True, history_text=history_text)
 
     @classmethod
     def error(cls, message: str) -> "CommandResponse":
-        return cls(message=f"[red]{message}[/red]", success=False)
+        return cls(message=f"[red]{message}[/red]", success=False, history_text=message)
 
 
 @dataclass(slots=True)
@@ -63,6 +68,85 @@ class Command:
     usage: str
     handler: Handler
     aliases: tuple[str, ...] = ()
+    run_in_background: bool = False
+
+
+def _format_decimal(value: Any, fallback: str = "n/a") -> str:
+    if value in (None, ""):
+        return fallback
+    try:
+        return f"{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _account_table(account: dict[str, Any]) -> Table:
+    table = Table(title="Paper Account")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="bold")
+    rows = [
+        ("Status", account.get("status", "unknown")),
+        ("Buying Power", _format_decimal(account.get("buying_power"))),
+        ("Equity", _format_decimal(account.get("equity"))),
+        ("Cash", _format_decimal(account.get("cash"))),
+        ("Portfolio Value", _format_decimal(account.get("portfolio_value"))),
+    ]
+    for label, value in rows:
+        table.add_row(label, str(value))
+    return table
+
+
+def _positions_table(positions: Sequence[dict[str, Any]]) -> Table:
+    table = Table(title="Open Positions")
+    table.add_column("Symbol", style="cyan")
+    table.add_column("Qty", justify="right")
+    table.add_column("Market Value", justify="right")
+    table.add_column("Unrealized P/L", justify="right")
+    for position in positions:
+        table.add_row(
+            str(position.get("symbol", "n/a")),
+            str(position.get("qty", "n/a")),
+            _format_decimal(position.get("market_value")),
+            _format_decimal(position.get("unrealized_pl")),
+        )
+    return table
+
+
+def _orders_table(orders: Sequence[dict[str, Any]]) -> Table:
+    table = Table(title="Recent Orders")
+    table.add_column("Ref", style="cyan bold")
+    table.add_column("Submitted", style="dim")
+    table.add_column("Symbol", style="cyan")
+    table.add_column("Side")
+    table.add_column("Qty", justify="right")
+    table.add_column("Type")
+    table.add_column("Status")
+    for order in orders:
+        table.add_row(
+            str(order.get("ref", "")),
+            str(order.get("submitted_at", "n/a")),
+            str(order.get("symbol", "n/a")),
+            str(order.get("side", "n/a")),
+            str(order.get("qty", "n/a")),
+            str(order.get("order_type", "n/a")),
+            str(order.get("status", "n/a")),
+        )
+    return table
+
+
+def _commands_table(commands: Sequence["Command"]) -> Table:
+    table = Table(title="Available Commands")
+    table.add_column("Command", style="cyan bold")
+    table.add_column("Usage", style="dim")
+    table.add_column("Description")
+    for command in commands:
+        alias_note = f" [{', '.join(command.aliases)}]" if command.aliases else ""
+        table.add_row(
+            f"{command.name}{alias_note}",
+            command.usage,
+            command.description,
+        )
+    return table
 
 
 def analyze_stock(context: CommandContext, args: Sequence[str]) -> CommandResponse:
@@ -157,14 +241,32 @@ def clear_chat_history(context: CommandContext, args: Sequence[str]) -> CommandR
 
 
 def list_commands(context: CommandContext, args: Sequence[str]) -> CommandResponse:
-    lines = ["[bold]Available commands[/bold]:"]
-    for command in COMMANDS.values():
-        alias_note = f" (alias: {', '.join(command.aliases)})" if command.aliases else ""
-        lines.append(
-            f"[cyan]{command.name}[/cyan]{alias_note} — {command.description} "
-            f"[dim]{command.usage}[/dim]"
-        )
-    return CommandResponse.ok("\n".join(lines))
+    return CommandResponse.ok(
+        _commands_table(list(COMMANDS.values())),
+        history_text="Listed available commands.",
+    )
+
+
+def _submit_order(symbol: str, qty: float, side: str) -> CommandResponse:
+    try:
+        order = trading.place_order({"symbol": symbol, "qty": qty, "side": side})
+    except FileNotFoundError as exc:
+        return CommandResponse.error(str(exc))
+    except ValueError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to submit {side} order: {exc}")
+    ref = trading.remember_order(order)
+    status = order.get("status", "accepted")
+    order_id = order.get("id", "n/a")
+    ref_text = f" · ref=[cyan]{ref}[/cyan]" if ref else ""
+    history_ref_text = f" · ref={ref}" if ref else ""
+    return CommandResponse.ok(
+        f"Submitted paper {side} order for [bold]{qty:g}[/bold] shares of "
+        f"[bold]{symbol}[/bold]. Status: [green]{status}[/green]{ref_text} · id={order_id}",
+        history_text=f"Submitted paper {side} order for {qty:g} shares of {symbol}. "
+        f"Status: {status}{history_ref_text} · id={order_id}",
+    )
 
 
 def buy_stock(context: CommandContext, args: Sequence[str]) -> CommandResponse:
@@ -175,7 +277,9 @@ def buy_stock(context: CommandContext, args: Sequence[str]) -> CommandResponse:
         qty = float(args[1])
     except ValueError:
         return CommandResponse.error("Quantity must be numeric.")
-    return CommandResponse.ok(f"Virtual order: buy {qty:g} shares of [bold]{symbol}[/bold].")
+    if qty <= 0:
+        return CommandResponse.error("Quantity must be greater than zero.")
+    return _submit_order(symbol, qty, "buy")
 
 
 def sell_stock(context: CommandContext, args: Sequence[str]) -> CommandResponse:
@@ -186,7 +290,156 @@ def sell_stock(context: CommandContext, args: Sequence[str]) -> CommandResponse:
         qty = float(args[1])
     except ValueError:
         return CommandResponse.error("Quantity must be numeric.")
-    return CommandResponse.ok(f"Virtual order: sell {qty:g} shares of [bold]{symbol}[/bold].")
+    if qty <= 0:
+        return CommandResponse.error("Quantity must be greater than zero.")
+    return _submit_order(symbol, qty, "sell")
+
+
+def close_position(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    if not args:
+        return CommandResponse.error("Usage: close <symbol>")
+    symbol = args[0].upper()
+    try:
+        result = trading.close_position(symbol)
+        status = result.get("status", "accepted")
+        return CommandResponse.ok(
+            f"Submitted close request for [bold]{symbol}[/bold]. "
+            f"Status: [green]{status}[/green]",
+            history_text=f"Submitted close request for {symbol}. Status: {status}",
+        )
+    except ValueError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to close position: {exc}")
+
+
+def cancel_order(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    if not args:
+        return CommandResponse.error("Usage: cancel-order <order_id|#ref>")
+    order_id = args[0].strip()
+    try:
+        trading.cancel_order(order_id)
+        return CommandResponse.ok(
+            f"Submitted cancel request for order [bold]{order_id}[/bold].",
+            history_text=f"Submitted cancel request for order {order_id}.",
+        )
+    except ValueError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to cancel order: {exc}")
+
+
+def cancel_last_order(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    last_order = trading.get_last_order_reference()
+    if last_order is None:
+        return CommandResponse.error("No recent order is available to cancel.")
+    ref = last_order["ref"]
+    try:
+        trading.cancel_order(ref)
+        return CommandResponse.ok(
+            f"Submitted cancel request for last order [bold]{ref}[/bold].",
+            history_text=f"Submitted cancel request for last order {ref}.",
+        )
+    except ValueError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to cancel last order: {exc}")
+
+
+def set_paper_trading_keys(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    if len(args) < 2:
+        return CommandResponse.error("Usage: set-paper <ALPACA_API_KEY> <ALPACA_SECRET_KEY>")
+    config = {
+        "api_key": args[0].strip(),
+        "secret_key": args[1].strip(),
+        "paper": True,
+    }
+    try:
+        trading.save_trading_config(config)
+        trading.init_trading_client(config)
+        return CommandResponse.ok(
+            "Alpaca paper-trading credentials saved and validated.",
+            history_text="Alpaca paper-trading credentials saved and validated.",
+        )
+    except ValueError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to save trading credentials: {exc}")
+
+
+def show_account(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    try:
+        account = trading.get_account()
+    except FileNotFoundError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to load account: {exc}")
+
+    return CommandResponse.ok(
+        _account_table(account),
+        history_text="Loaded paper account summary.",
+    )
+
+
+def show_positions(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    try:
+        positions = trading.get_positions()
+    except FileNotFoundError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to load positions: {exc}")
+
+    if not positions:
+        return CommandResponse.ok("No open paper positions.")
+
+    return CommandResponse.ok(
+        _positions_table(positions),
+        history_text=f"Loaded {len(positions)} open positions.",
+    )
+
+
+def show_portfolio(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    try:
+        account = trading.get_account()
+        positions = trading.get_positions()
+    except FileNotFoundError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to load portfolio: {exc}")
+
+    renderables: list[Any] = [_account_table(account)]
+    if positions:
+        renderables.append(_positions_table(positions))
+        history_text = f"Loaded portfolio with {len(positions)} positions."
+    else:
+        renderables.append(Text("No open paper positions.", style="dim"))
+        history_text = "Loaded portfolio with no open positions."
+    return CommandResponse.ok(Group(*renderables), history_text=history_text)
+
+
+def show_orders(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    limit = 20
+    if args:
+        try:
+            limit = int(args[0])
+        except ValueError:
+            return CommandResponse.error("Usage: orders [limit]")
+        if limit <= 0:
+            return CommandResponse.error("Order limit must be greater than zero.")
+
+    try:
+        orders = trading.get_orders(limit=limit)
+    except FileNotFoundError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to load orders: {exc}")
+
+    if not orders:
+        return CommandResponse.ok("No recent paper orders.")
+    return CommandResponse.ok(
+        _orders_table(orders),
+        history_text=f"Loaded {len(orders)} recent paper orders.",
+    )
 
 
 def set_api_key(context: CommandContext, args: Sequence[str]) -> CommandResponse:
@@ -255,21 +508,80 @@ COMMANDS: dict[str, Command] = {
     ),
     "buy": Command(
         name="buy",
-        description="Record a virtual buy order",
+        description="Submit a paper buy order",
         usage="buy <symbol> <qty>",
         handler=buy_stock,
+        run_in_background=True,
     ),
     "sell": Command(
         name="sell",
-        description="Record a virtual sell order",
+        description="Submit a paper sell order",
         usage="sell <symbol> <qty>",
         handler=sell_stock,
+        run_in_background=True,
+    ),
+    "close": Command(
+        name="close",
+        description="Close an open paper position",
+        usage="close <symbol>",
+        handler=close_position,
+        run_in_background=True,
+    ),
+    "cancel-order": Command(
+        name="cancel-order",
+        description="Cancel a paper order by ID",
+        usage="cancel-order <order_id|#ref>",
+        handler=cancel_order,
+        aliases=("cancel",),
+        run_in_background=True,
+    ),
+    "cancel-last": Command(
+        name="cancel-last",
+        description="Cancel the most recent tracked paper order",
+        usage="cancel-last",
+        handler=cancel_last_order,
+        run_in_background=True,
+    ),
+    "set-paper": Command(
+        name="set-paper",
+        description="Validate and store Alpaca paper-trading credentials",
+        usage="set-paper <ALPACA_API_KEY> <ALPACA_SECRET_KEY>",
+        handler=set_paper_trading_keys,
+        run_in_background=True,
     ),
     "set-key": Command(
         name="set-key",
         description="Validate and store Groq API key",
         usage="set-key <GROQ_API_KEY>",
         handler=set_api_key,
+    ),
+    "account": Command(
+        name="account",
+        description="Show paper account summary",
+        usage="account",
+        handler=show_account,
+        run_in_background=True,
+    ),
+    "positions": Command(
+        name="positions",
+        description="Show open paper positions",
+        usage="positions",
+        handler=show_positions,
+        run_in_background=True,
+    ),
+    "portfolio": Command(
+        name="portfolio",
+        description="Show account summary and open positions",
+        usage="portfolio",
+        handler=show_portfolio,
+        run_in_background=True,
+    ),
+    "orders": Command(
+        name="orders",
+        description="Show recent paper orders",
+        usage="orders [limit]",
+        handler=show_orders,
+        run_in_background=True,
     ),
     "about": Command(
         name="about",

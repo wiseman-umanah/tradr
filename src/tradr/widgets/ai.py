@@ -4,13 +4,12 @@ import os
 import re
 from rich.markdown import Markdown
 from rich.text import Text
-from textual.containers import Vertical
 from textual.widgets import Input, RichLog
 from textual.app import ComposeResult
 from textual.widget import Widget
 from textual import on, work
 
-from tradr.commands import CommandContext, CommandResponse, execute_command
+from tradr.commands import Command, CommandContext, CommandResponse, find_command
 from tradr import groq
 
 
@@ -64,33 +63,58 @@ class AiChat(Widget):
             self.output.clear()
 
     # COMMAND HANDLER
-    def run_command(self, text: str) -> bool:
-        parts = text.strip().split()
-
-        if not parts:
-            return True
-
-        cmd = parts[0].lower()
-        args = parts[1:]
+    def run_command(self, command: Command, args: list[str]) -> bool:
         context = CommandContext(app=self.app, chat=self)
-
-        response = execute_command(cmd, context, args)
+        response = command.handler(context, args)
         if response is None:
             return False
 
         self._write_response(response)
         if response.success:
-            plain = Text.from_markup(response.message).plain
-            self._record_history("assistant", plain)
+            history_text = self._response_history_text(response)
+            if history_text:
+                self._record_history("assistant", history_text)
         return True
 
     def _write_response(self, response: CommandResponse) -> None:
         self.output.write(response.message)
 
+    def _response_history_text(self, response: CommandResponse) -> str:
+        if response.history_text:
+            return response.history_text.strip()
+        if isinstance(response.message, str):
+            return Text.from_markup(response.message).plain.strip()
+        return ""
+
     def _record_history(self, role: str, text: str) -> None:
         self.history.append((role, text.strip()))
         if len(self.history) > 50:
             self.history = self.history[-50:]
+
+    def _command_status_message(self, command: Command) -> str:
+        if command.name in {"buy", "sell", "close"}:
+            return f"[dim]Submitting {command.name} order...[/dim]"
+        if command.name in {"cancel-order", "cancel-last"}:
+            return "[dim]Submitting cancel request...[/dim]"
+        if command.name == "set-paper":
+            return "[dim]Validating paper-trading credentials...[/dim]"
+        return f"[dim]Running {command.name}...[/dim]"
+
+    @work(thread=True)
+    def _run_background_command(self, command: Command, args: list[str]) -> None:
+        context = CommandContext(app=self.app, chat=self)
+        try:
+            response = command.handler(context, args)
+        except Exception as exc:
+            response = CommandResponse.error(f"Command failed: {exc}")
+        self.app.call_from_thread(self._handle_command_response, response)
+
+    def _handle_command_response(self, response: CommandResponse) -> None:
+        self._write_response(response)
+        if response.success:
+            history_text = self._response_history_text(response)
+            if history_text:
+                self._record_history("assistant", history_text)
 
     def chat_with_ai(self, text: str):
         if not self.ai_ready:
@@ -177,10 +201,24 @@ class AiChat(Widget):
 
         self.output.write(f"[bold]>[/bold] {text}")
         self._record_history("user", text)
+        event.input.value = ""
 
-        handled = self.run_command(text)
+        parts = text.split()
+        if not parts:
+            return
+
+        cmd = parts[0].lower()
+        args = parts[1:]
+        command = find_command(cmd)
+        if command is None:
+            self.chat_with_ai(text)
+            return
+
+        if command.run_in_background:
+            self.output.write(self._command_status_message(command))
+            self._run_background_command(command, args)
+            return
+
+        handled = self.run_command(command, args)
         if not handled:
             self.chat_with_ai(text)
-
-        # clear input
-        event.input.value = ""
