@@ -1,13 +1,32 @@
 from __future__ import annotations
+import json
+from pathlib import Path
 from rich.text import Text
 from textual import work
 from textual.widgets import DataTable
 from tradr.market import get_snapshots, load_symbol_list
+from platformdirs import user_config_dir
 
 REFRESH_SECONDS = 30
 SYMBOL_REFRESH_SECONDS = 86400  # 24 hours
 DISPLAY_SIZE = 50  # symbols visible at a time
 ROTATION_SECONDS = 300  # rotate pool every 5 mins
+CONFIG_DIR = Path(user_config_dir(appname="tradr", appauthor="wiseman-umanah", ensure_exists=True))
+WATCHLIST_FILE = CONFIG_DIR / "watchlist.json"
+
+
+def _load_pinned_symbols() -> list[str]:
+    try:
+        with WATCHLIST_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+        return [str(symbol).upper().strip() for symbol in data.get("pinned", []) if symbol]
+    except Exception:
+        return []
+
+
+def _save_pinned_symbols(symbols: list[str]) -> None:
+    with WATCHLIST_FILE.open("w", encoding="utf-8") as file:
+        json.dump({"pinned": symbols}, file)
 
 class Watchlist(DataTable):
     """Scrollable watchlist that streams price updates."""
@@ -15,7 +34,7 @@ class Watchlist(DataTable):
     def __init__(self) -> None:
         super().__init__(id="watchlist")
         self.all_symbols: list[str] = []
-        self.pinned_symbols: list[str] = []
+        self.pinned_symbols: list[str] = _load_pinned_symbols()
         self.symbols: list[str] = []
         self._row_keys: set[str] = set()
         self._column_keys: list = []
@@ -79,6 +98,7 @@ class Watchlist(DataTable):
         if symbol in self.pinned_symbols:
             return False
         self.pinned_symbols.insert(0, symbol)
+        _save_pinned_symbols(self.pinned_symbols)
         self._update_display_symbols()
         self.load_watchlist()
         return True
@@ -89,6 +109,7 @@ class Watchlist(DataTable):
         if symbol not in self.pinned_symbols:
             return False
         self.pinned_symbols.remove(symbol)
+        _save_pinned_symbols(self.pinned_symbols)
         self._update_display_symbols()
         self._remove_stale_rows()
         self.load_watchlist()

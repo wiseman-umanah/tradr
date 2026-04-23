@@ -16,10 +16,12 @@ from platformdirs import user_config_dir
 from tradr import trading
 
 try:
+    from alpaca.data.enums import DataFeed
     from alpaca.data.historical.stock import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 except ModuleNotFoundError:
+    DataFeed = None  # type: ignore[assignment]
     StockHistoricalDataClient = None  # type: ignore[assignment]
     StockBarsRequest = None  # type: ignore[assignment]
     StockSnapshotRequest = None  # type: ignore[assignment]
@@ -28,10 +30,12 @@ except ModuleNotFoundError:
 
 CONFIG_DIR = Path(user_config_dir(appname="tradr", appauthor="wiseman-umanah", ensure_exists=True))
 SYMBOLS_FILE = CONFIG_DIR / "symbols.json"
+MARKET_CONFIG_FILE = CONFIG_DIR / "market.json"
 CACHE_HOURS = 24
 
 SP500_URL = "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv"
 NASDAQ_URL = "https://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt"
+DEFAULT_DATA_FEED = "iex"
 
 
 def _alpaca_available() -> bool:
@@ -45,6 +49,49 @@ def _alpaca_available() -> bool:
             TimeFrameUnit,
         )
     )
+
+
+def get_data_feed_name() -> str:
+    """Return the Alpaca stock data feed name.
+
+    Basic/free Alpaca accounts can use real-time IEX data. SIP requires a paid
+    market-data subscription, so default to IEX unless the user opts into SIP.
+    """
+    env_feed = os.getenv("ALPACA_DATA_FEED")
+    if env_feed:
+        return _normalize_data_feed(env_feed)
+    try:
+        with MARKET_CONFIG_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+            return _normalize_data_feed(data.get("feed", DEFAULT_DATA_FEED))
+    except Exception:
+        return DEFAULT_DATA_FEED
+
+
+def _normalize_data_feed(feed: str) -> str:
+    normalized = feed.strip().lower().replace("-", "_")
+    if normalized not in {"iex", "sip", "delayed_sip"}:
+        raise ValueError("Feed must be one of: iex, sip, delayed_sip.")
+    return normalized
+
+
+def save_data_feed(feed: str) -> str:
+    normalized = _normalize_data_feed(feed)
+    os.environ["ALPACA_DATA_FEED"] = normalized
+    with MARKET_CONFIG_FILE.open("w", encoding="utf-8") as file:
+        json.dump({"feed": normalized, "updated": datetime.now().isoformat()}, file)
+    return normalized
+
+
+def _data_feed() -> Any:
+    feed_name = get_data_feed_name()
+    if DataFeed is None:
+        return feed_name
+    if feed_name == "sip":
+        return DataFeed.SIP
+    if feed_name == "delayed_sip":
+        return getattr(DataFeed, "DELAYED_SIP", "delayed_sip")
+    return DataFeed.IEX
 
 
 def _get_data_client() -> Any | None:
@@ -150,6 +197,7 @@ def _get_alpaca_bars(
         start=_start_for_period(period),
         end=datetime.now(timezone.utc),
         limit=max_candles or 1000,
+        feed=_data_feed(),
     )
     response = client.get_stock_bars(request)
     bars_by_symbol = getattr(response, "data", response)
@@ -237,7 +285,10 @@ def get_snapshots(symbols: list[str]) -> dict[str, dict[str, Any]]:
     client = _get_data_client()
     if client is not None:
         try:
-            request = StockSnapshotRequest(symbol_or_symbols=clean_symbols)
+            request = StockSnapshotRequest(
+                symbol_or_symbols=clean_symbols,
+                feed=_data_feed(),
+            )
             response = client.get_stock_snapshot(request)
             snapshot_map = getattr(response, "data", response)
             results: dict[str, dict[str, Any]] = {}

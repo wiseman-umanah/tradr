@@ -4,6 +4,7 @@ import os
 import pickle
 import re
 from collections import deque
+import json
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -17,11 +18,46 @@ from alpaca.trading.requests import MarketOrderRequest
 
 CONFIG_DIR = Path(user_config_dir(appname="tradr", appauthor="wiseman-umanah", ensure_exists=True))
 CONFIG_FILE = CONFIG_DIR / "trading.pkl"
+ORDER_REFS_FILE = CONFIG_DIR / "order_refs.json"
 _client: Any | None = None
 _order_ref_lock = Lock()
 _recent_order_refs: deque[dict[str, str]] = deque(maxlen=10)
 _order_id_to_ref: dict[str, str] = {}
 _next_order_ref = 1
+
+
+def _load_order_refs() -> None:
+    global _next_order_ref
+    if not ORDER_REFS_FILE.exists():
+        return
+    try:
+        with ORDER_REFS_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except Exception:
+        return
+    with _order_ref_lock:
+        _recent_order_refs.clear()
+        _order_id_to_ref.clear()
+        for entry in data.get("orders", [])[:10]:
+            ref = str(entry.get("ref", "")).strip()
+            order_id = str(entry.get("order_id", "")).strip()
+            symbol = str(entry.get("symbol", "")).strip()
+            if not ref or not order_id:
+                continue
+            _recent_order_refs.append({"ref": ref, "order_id": order_id, "symbol": symbol})
+            _order_id_to_ref[order_id] = ref
+        refs = [
+            int(entry["ref"].lstrip("#"))
+            for entry in _recent_order_refs
+            if entry["ref"].startswith("#") and entry["ref"].lstrip("#").isdigit()
+        ]
+        if refs:
+            _next_order_ref = max(refs) + 1
+
+
+def _save_order_refs() -> None:
+    with ORDER_REFS_FILE.open("w", encoding="utf-8") as file:
+        json.dump({"orders": list(_recent_order_refs)}, file)
 
 
 def _error_text(exc: Exception) -> str:
@@ -93,6 +129,7 @@ def remember_order(order: dict[str, Any]) -> str | None:
         for known_id in list(_order_id_to_ref):
             if known_id not in valid_ids:
                 _order_id_to_ref.pop(known_id, None)
+        _save_order_refs()
         return ref
 
 
@@ -251,7 +288,9 @@ def place_order(order: dict) -> dict:
         time_in_force=TimeInForce.DAY,
     )
     submitted = client.submit_order(order_data=order_request)
-    return _serialize_model(submitted)
+    serialized = _serialize_model(submitted)
+    remember_order(serialized)
+    return serialized
 
 
 def get_positions() -> list[dict]:
@@ -277,6 +316,50 @@ def get_orders(limit: int = 20) -> list[dict]:
     return serialized[:limit] if limit > 0 else serialized
 
 
+def get_order(order_reference: str) -> dict:
+    order_id = resolve_order_reference(order_reference)
+    client = get_trading_client()
+    try:
+        order = client.get_order_by_id(order_id)
+    except Exception as exc:
+        if _is_not_found_error(exc):
+            raise ValueError("The order does not exist.") from exc
+        raise
+    serialized = _serialize_model(order)
+    ref = remember_order(serialized)
+    if ref:
+        serialized["ref"] = ref
+    return serialized
+
+
+def get_open_orders_for_symbol(symbol: str) -> list[dict]:
+    target = symbol.upper().strip()
+    orders = get_orders(limit=100)
+    open_statuses = {
+        "new",
+        "accepted",
+        "pending_new",
+        "partially_filled",
+        "held",
+        "pending_replace",
+        "pending_cancel",
+    }
+    return [
+        order
+        for order in orders
+        if str(order.get("symbol", "")).upper() == target
+        and str(order.get("status", "")).lower() in open_statuses
+    ]
+
+
+def get_position(symbol: str) -> dict | None:
+    target = symbol.upper().strip()
+    for position in get_positions():
+        if str(position.get("symbol", "")).upper() == target:
+            return position
+    return None
+
+
 def close_position(symbol: str) -> dict:
     normalized = symbol.upper().strip()
     if not normalized:
@@ -300,3 +383,12 @@ def cancel_order(order_id: str) -> None:
         if _is_not_found_error(exc):
             raise ValueError("The order does not exist.") from exc
         raise
+
+
+def get_market_clock() -> dict:
+    client = get_trading_client()
+    clock = client.get_clock()
+    return _serialize_model(clock)
+
+
+_load_order_refs()

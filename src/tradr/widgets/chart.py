@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from threading import Lock, Thread
 from typing import Any
 
@@ -9,12 +10,14 @@ from textual import work
 from textual.app import RenderResult
 from textual_plotext import PlotextPlot
 
-from tradr.market import extract_ohlcv, get_ohlcv
-from tradr.trading import get_trading_config
+from tradr.market import extract_ohlcv, get_data_feed_name, get_ohlcv
+from tradr.trading import get_market_clock, get_trading_config
 
 try:
+    from alpaca.data.enums import DataFeed
     from alpaca.data.live.stock import StockDataStream
 except ModuleNotFoundError:
+    DataFeed = None  # type: ignore[assignment]
     StockDataStream = None  # type: ignore[assignment]
 
 DEFAULT_SYMBOL = "AAPL"
@@ -109,6 +112,17 @@ def _minute_frame_from_bar(bar: Any) -> pd.DataFrame:
     return frame.set_index("Date")
 
 
+def _stream_feed() -> Any:
+    feed_name = get_data_feed_name()
+    if DataFeed is None:
+        return feed_name
+    if feed_name == "sip":
+        return DataFeed.SIP
+    if feed_name == "delayed_sip":
+        return getattr(DataFeed, "DELAYED_SIP", "delayed_sip")
+    return DataFeed.IEX
+
+
 class Chart(PlotextPlot):
     """Handle the chart"""
     can_focus = True
@@ -126,6 +140,9 @@ class Chart(PlotextPlot):
         self._stream_lock = Lock()
         self._stream_generation = 0
         self._stream_active = False
+        self._live_only = False
+        self._market_state = "unknown"
+        self._last_bar_timestamp: pd.Timestamp | None = None
         # follow the application's current theme (auto = textual palette)
         self.theme = "auto"
 
@@ -145,6 +162,16 @@ class Chart(PlotextPlot):
             return Text.from_markup(f"[red]Failed to load chart: {self._error}[/red]")
         return super().render()
 
+    def _chart_title(self) -> str:
+        mode = f"live {get_data_feed_name()}" if self._stream_active else f"polling {get_data_feed_name()}"
+        title = f"{self.symbol} — {self.period} @ {self.interval} · {mode} · {self._market_state}"
+        if self._last_bar_timestamp is not None:
+            ts = self._last_bar_timestamp
+            if ts.tzinfo is not None:
+                ts = ts.tz_convert(datetime.now().astimezone().tzinfo)
+            title += f" · last {ts.strftime('%d/%m %H:%M')}"
+        return title
+
     def refresh_chart(self) -> None:
         """Kick off a background refresh."""
         if self._stream_active:
@@ -163,23 +190,26 @@ class Chart(PlotextPlot):
                 f"{self.symbol} {self.period} @ {self.interval}"
             )
 
-            data = get_ohlcv(
-                self.symbol,
-                self.period,
-                self.interval,
-                max_candles=MAX_CANDLES,
-            )
+            data = pd.DataFrame() if self._live_only else get_ohlcv(
+                    self.symbol,
+                    self.period,
+                    self.interval,
+                    max_candles=MAX_CANDLES,
+                )
             self._history = data.copy()
             self._live_minutes = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+            self._market_state = self._resolve_market_state()
             self._sync_stream()
-            ohlcv = extract_ohlcv(self._display_data())
+            display_data = self._display_data()
 
             plot = self.plt
             plot.clf()
             plot.date_form("d/m/Y H:M")
             plot.plotsize(width, height)
-            plot.title(f"{self.symbol} — {self.period}")
-            plot.candlestick(ohlcv["dates"], ohlcv)
+            plot.title(self._chart_title())
+            if not display_data.empty:
+                ohlcv = extract_ohlcv(display_data)
+                plot.candlestick(ohlcv["dates"], ohlcv)
 
             self._error = None
             self.app.call_from_thread(self.refresh)
@@ -192,14 +222,38 @@ class Chart(PlotextPlot):
     def _display_data(self) -> pd.DataFrame:
         data = self._history.copy()
         if self._live_minutes.empty:
-            return data.tail(MAX_CANDLES)
+            data = data.tail(MAX_CANDLES)
+            self._last_bar_timestamp = pd.Timestamp(data.index[-1]) if not data.empty else None
+            return data
         live = _resample_ohlcv(self._live_minutes, self.interval)
         if live.empty:
-            return data.tail(MAX_CANDLES)
+            data = data.tail(MAX_CANDLES)
+            self._last_bar_timestamp = pd.Timestamp(data.index[-1]) if not data.empty else None
+            return data
         combined = pd.concat([data, live])
         combined = combined[~combined.index.duplicated(keep="last")]
         combined = combined.sort_index()
+        self._last_bar_timestamp = pd.Timestamp(combined.index[-1]) if not combined.empty else None
         return combined.tail(MAX_CANDLES)
+
+    def _resolve_market_state(self) -> str:
+        try:
+            clock = get_market_clock()
+        except Exception:
+            return "session unknown"
+        is_open = bool(clock.get("is_open"))
+        if is_open:
+            return "market open"
+        next_open = clock.get("next_open")
+        if next_open:
+            try:
+                next_open_ts = pd.Timestamp(next_open)
+                if next_open_ts.tzinfo is not None:
+                    next_open_ts = next_open_ts.tz_convert(datetime.now().astimezone().tzinfo)
+                return f"market closed · opens {next_open_ts.strftime('%d/%m %H:%M')}"
+            except Exception:
+                pass
+        return "market closed"
 
     def _sync_stream(self) -> None:
         self._stop_stream()
@@ -214,7 +268,10 @@ class Chart(PlotextPlot):
 
         generation = self._stream_generation + 1
         self._stream_generation = generation
-        stream = StockDataStream(api_key, secret_key)  # type: ignore[operator]
+        try:
+            stream = StockDataStream(api_key, secret_key, feed=_stream_feed())  # type: ignore[operator]
+        except TypeError:
+            stream = StockDataStream(api_key, secret_key)  # type: ignore[operator]
 
         async def handle_bar(bar: Any) -> None:
             if generation != self._stream_generation:
@@ -266,13 +323,15 @@ class Chart(PlotextPlot):
         try:
             width = self.size.width or 100
             height = self.size.height or 30
-            ohlcv = extract_ohlcv(self._display_data())
+            display_data = self._display_data()
             plot = self.plt
             plot.clf()
             plot.date_form("d/m/Y H:M")
             plot.plotsize(width, height)
-            plot.title(f"{self.symbol} — {self.period}")
-            plot.candlestick(ohlcv["dates"], ohlcv)
+            plot.title(self._chart_title())
+            if not display_data.empty:
+                ohlcv = extract_ohlcv(display_data)
+                plot.candlestick(ohlcv["dates"], ohlcv)
             self._error = None
         finally:
             self.refresh()
@@ -285,6 +344,7 @@ class Chart(PlotextPlot):
     ) -> None:
         """Call this from outside to update the chart"""
         self.symbol = symbol
+        self._live_only = False
         if period is not None:
             normalized_period = _normalize(period, VALID_PERIODS, DEFAULT_PERIOD)
             if normalized_period != period:
@@ -299,4 +359,16 @@ class Chart(PlotextPlot):
                     f"Invalid interval '{interval}' received, using '{normalized_interval}'"
                 )
             self.interval = normalized_interval
+        self.refresh_chart()
+
+    def start_live(self, symbol: str, interval: str | None = None) -> None:
+        """Start a live-only chart that only draws incoming websocket bars."""
+        self.symbol = symbol.upper().strip()
+        self.period = "live"
+        self._live_only = True
+        if interval is not None:
+            self.interval = _normalize(interval, VALID_INTERVALS, DEFAULT_INTERVAL)
+        self._history = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        self._live_minutes = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        self._last_bar_timestamp = None
         self.refresh_chart()

@@ -14,7 +14,6 @@ Screen {
 }
 
 #watchlist {
-	border: solid blue;
 	height: 100%;
 	overflow-y: auto;
 	padding: 1;

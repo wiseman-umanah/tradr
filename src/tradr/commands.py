@@ -9,7 +9,7 @@ from rich.table import Table
 from rich.text import Text
 from textual.app import App
 
-from tradr.market import get_ohlcv
+from tradr.market import get_data_feed_name, get_ohlcv, save_data_feed
 from tradr import groq
 from tradr import trading
 from tradr.widgets.chart import Chart
@@ -96,6 +96,22 @@ def _account_table(account: dict[str, Any]) -> Table:
     return table
 
 
+def _market_table(clock: dict[str, Any], feed: str) -> Table:
+    table = Table(title="Market State")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="bold")
+    rows = [
+        ("Feed", feed),
+        ("Open", str(clock.get("is_open", "unknown"))),
+        ("Timestamp", clock.get("timestamp", "n/a")),
+        ("Next Open", clock.get("next_open", "n/a")),
+        ("Next Close", clock.get("next_close", "n/a")),
+    ]
+    for label, value in rows:
+        table.add_row(label, str(value))
+    return table
+
+
 def _positions_table(positions: Sequence[dict[str, Any]]) -> Table:
     table = Table(title="Open Positions")
     table.add_column("Symbol", style="cyan")
@@ -131,6 +147,29 @@ def _orders_table(orders: Sequence[dict[str, Any]]) -> Table:
             str(order.get("order_type", "n/a")),
             str(order.get("status", "n/a")),
         )
+    return table
+
+
+def _order_detail_table(order: dict[str, Any]) -> Table:
+    table = Table(title=f"Order {order.get('ref', '')}".strip())
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="bold")
+    fields = [
+        ("ID", order.get("id", "n/a")),
+        ("Symbol", order.get("symbol", "n/a")),
+        ("Side", order.get("side", "n/a")),
+        ("Type", order.get("order_type", "n/a")),
+        ("Status", order.get("status", "n/a")),
+        ("Qty", order.get("qty", "n/a")),
+        ("Filled Qty", order.get("filled_qty", "n/a")),
+        ("Filled Avg Price", order.get("filled_avg_price", "n/a")),
+        ("Submitted", order.get("submitted_at", "n/a")),
+        ("Filled At", order.get("filled_at", "n/a")),
+        ("Canceled At", order.get("canceled_at", "n/a")),
+    ]
+    for label, value in fields:
+        if value not in (None, ""):
+            table.add_row(label, str(value))
     return table
 
 
@@ -227,11 +266,32 @@ def update_chart(context: CommandContext, args: Sequence[str]) -> CommandRespons
     if chart is None:
         return CommandResponse.error("Chart widget is not available.")
 
+    if period == "live":
+        chart.start_live(symbol, interval=interval)
+        return CommandResponse.ok(
+            f"Starting live-only chart for [bold]{symbol}[/bold]"
+            + (f" · interval={interval}" if interval else "")
+        )
+
     chart.update_symbol(symbol, period=period, interval=interval)
     return CommandResponse.ok(
         f"Updating chart to [bold]{symbol}[/bold]"
         + (f" · period={period}" if period else "")
         + (f" · interval={interval}" if interval else "")
+    )
+
+
+def start_live_chart(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    if not args:
+        return CommandResponse.error("Usage: live <symbol> [interval]")
+    symbol = args[0].upper()
+    interval = args[1] if len(args) > 1 else "1m"
+    chart = context.get_chart()
+    if chart is None:
+        return CommandResponse.error("Chart widget is not available.")
+    chart.start_live(symbol, interval=interval)
+    return CommandResponse.ok(
+        f"Starting live-only chart for [bold]{symbol}[/bold] · interval={interval}"
     )
 
 
@@ -248,6 +308,33 @@ def list_commands(context: CommandContext, args: Sequence[str]) -> CommandRespon
 
 
 def _submit_order(symbol: str, qty: float, side: str) -> CommandResponse:
+    if side == "sell":
+        try:
+            position = trading.get_position(symbol)
+            open_orders = trading.get_open_orders_for_symbol(symbol)
+        except FileNotFoundError as exc:
+            return CommandResponse.error(str(exc))
+        except Exception:
+            position = None
+            open_orders = []
+        if position is None:
+            pending_buy = next(
+                (
+                    order
+                    for order in open_orders
+                    if str(order.get("side", "")).lower() == "buy"
+                ),
+                None,
+            )
+            if pending_buy:
+                ref = pending_buy.get("ref", "n/a")
+                status = pending_buy.get("status", "open")
+                return CommandResponse.error(
+                    f"You do not have a filled {symbol} position yet. "
+                    f"Your buy order {ref} is still {status}."
+                )
+            return CommandResponse.error(f"You do not have a filled {symbol} position to sell.")
+
     try:
         order = trading.place_order({"symbol": symbol, "qty": qty, "side": side})
     except FileNotFoundError as exc:
@@ -261,9 +348,13 @@ def _submit_order(symbol: str, qty: float, side: str) -> CommandResponse:
     order_id = order.get("id", "n/a")
     ref_text = f" · ref=[cyan]{ref}[/cyan]" if ref else ""
     history_ref_text = f" · ref={ref}" if ref else ""
+    guidance = ""
+    if status in {"accepted", "new", "pending_new"}:
+        guidance = " Order accepted, waiting to fill. Run [cyan]orders[/cyan] to track it."
     return CommandResponse.ok(
         f"Submitted paper {side} order for [bold]{qty:g}[/bold] shares of "
-        f"[bold]{symbol}[/bold]. Status: [green]{status}[/green]{ref_text} · id={order_id}",
+        f"[bold]{symbol}[/bold]. Status: [green]{status}[/green]{ref_text} · id={order_id}."
+        f"{guidance}",
         history_text=f"Submitted paper {side} order for {qty:g} shares of {symbol}. "
         f"Status: {status}{history_ref_text} · id={order_id}",
     )
@@ -442,6 +533,57 @@ def show_orders(context: CommandContext, args: Sequence[str]) -> CommandResponse
     )
 
 
+def show_order(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    if not args:
+        return CommandResponse.error("Usage: order <order_id|#ref>")
+    reference = args[0].strip()
+    try:
+        order = trading.get_order(reference)
+    except ValueError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to load order: {exc}")
+    return CommandResponse.ok(
+        _order_detail_table(order),
+        history_text=f"Loaded order {reference}.",
+    )
+
+
+def manage_feed(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    if not args:
+        feed = get_data_feed_name()
+        return CommandResponse.ok(
+            f"Current market data feed: [cyan]{feed}[/cyan]. "
+            "Use [bold]feed iex[/bold], [bold]feed sip[/bold], or [bold]feed delayed_sip[/bold].",
+            history_text=f"Current market data feed: {feed}.",
+        )
+    try:
+        feed = save_data_feed(args[0])
+    except ValueError as exc:
+        return CommandResponse.error(str(exc))
+    chart = context.get_chart()
+    if chart is not None:
+        chart.refresh_chart()
+    return CommandResponse.ok(
+        f"Market data feed set to [cyan]{feed}[/cyan].",
+        history_text=f"Market data feed set to {feed}.",
+    )
+
+
+def show_market(context: CommandContext, args: Sequence[str]) -> CommandResponse:
+    feed = get_data_feed_name()
+    try:
+        clock = trading.get_market_clock()
+    except FileNotFoundError as exc:
+        return CommandResponse.error(str(exc))
+    except Exception as exc:
+        return CommandResponse.error(f"Failed to load market state: {exc}")
+    return CommandResponse.ok(
+        _market_table(clock, feed),
+        history_text=f"Loaded market state for feed {feed}.",
+    )
+
+
 def set_api_key(context: CommandContext, args: Sequence[str]) -> CommandResponse:
     if len(args) != 1:
         return CommandResponse.error("Usage: set-key <GROQ_API_KEY>")
@@ -496,9 +638,15 @@ COMMANDS: dict[str, Command] = {
     "chart": Command(
         name="chart",
         description="Update the chart to a symbol/timeframe",
-        usage="chart <symbol> [period] [interval]",
+        usage="chart <symbol> [period|live] [interval]",
         handler=update_chart,
         aliases=("setchart",),
+    ),
+    "live": Command(
+        name="live",
+        description="Start a live-only chart from incoming websocket bars",
+        usage="live <symbol> [interval]",
+        handler=start_live_chart,
     ),
     "clear": Command(
         name="clear",
@@ -581,6 +729,26 @@ COMMANDS: dict[str, Command] = {
         description="Show recent paper orders",
         usage="orders [limit]",
         handler=show_orders,
+        run_in_background=True,
+    ),
+    "order": Command(
+        name="order",
+        description="Show details for a paper order",
+        usage="order <order_id|#ref>",
+        handler=show_order,
+        run_in_background=True,
+    ),
+    "feed": Command(
+        name="feed",
+        description="Show or set the Alpaca market data feed",
+        usage="feed [iex|sip|delayed_sip]",
+        handler=manage_feed,
+    ),
+    "market": Command(
+        name="market",
+        description="Show market session state and configured data feed",
+        usage="market",
+        handler=show_market,
         run_in_background=True,
     ),
     "about": Command(
